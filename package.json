@@ -1,0 +1,20 @@
+{
+  "name": "sogniai-manager-bot",
+  "version": "1.0.0",
+  "description": "Бот для ежедневного клейма и генерации изображений Sogni.ai",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@sogni-ai/sogni-client": "^1.0.0",
+    "axios": "^1.3.4",
+    "chalk": "^5.0.1",
+    "inquirer": "^9.0.0",
+    "puppeteer": "^20.7.4",
+    "fs": "^0.0.1-security"
+  },
+  "author": "",
+  "license": "ISC"
+}
