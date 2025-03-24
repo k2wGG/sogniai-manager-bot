@@ -3,6 +3,9 @@ import { SogniClient } from '@sogni-ai/sogni-client';
 import fs from 'fs';
 import chalk from 'chalk';
 
+/**
+ * Списки для генерации случайных prompt'ов.
+ */
 const subjects = [
   'dragon', 'cyborg', 'pirate queen', 'ghostly samurai', 
   'dark angel', 'robot assassin', 'shaman warrior', 
@@ -38,23 +41,27 @@ const styles = [
   'watercolor painting', '3D render', 'vintage illustration', 'fantasy art'
 ];
 
-/** Выбор случайного элемента */
+/**
+ * Функция для выбора случайного элемента массива.
+ */
 function getRandomElement(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-/** Генерация случайного prompt */
+/**
+ * Считываем кастомные промты (если есть) из prompts.txt и выбираем случайный.
+ * С вероятностью 50% используем кастомный промт, иначе собираем случайный prompt из списков.
+ */
 function getRandomPrompt() {
   let customPrompts = [];
   try {
     if (fs.existsSync('prompts.txt')) {
       const data = fs.readFileSync('prompts.txt', 'utf-8');
-      customPrompts = data.split('\n').map(line => line.trim()).filter(line => line);
+      customPrompts = data.split('\n').map(line => line.trim()).filter(Boolean);
     }
   } catch (error) {
     console.error(chalk.red('Ошибка при чтении prompts.txt:'), error);
   }
-
   if (customPrompts.length && Math.random() < 0.5) {
     return getRandomElement(customPrompts);
   } else {
@@ -66,35 +73,40 @@ function getRandomPrompt() {
   }
 }
 
-/** Функция задержки */
+/**
+ * Функция задержки.
+ */
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
- * Генерация изображения для одного аккаунта, с учётом прокси (если указано).
+ * Генерация одного изображения, используя УЖЕ авторизованный клиент.
+ * - Не создаём клиента заново
+ * - Не делаем login() заново
  */
-async function generateOnce(username, password, uuid, accountIndex, iteration, proxyUrl = null) {
-  if (proxyUrl) {
-    process.env.HTTP_PROXY = proxyUrl;
-    process.env.HTTPS_PROXY = proxyUrl;
-    console.log(chalk.green(`(Акк #${accountIndex}) Используется прокси: ${proxyUrl}`));
+async function generateOnceUsingClient(client, accountIndex, iteration) {
+  // Ждём, пока библиотека соберёт список доступных моделей
+  await client.projects.waitForModels();
+  const availableModels = client.projects.availableModels;
+  if (!availableModels || availableModels.length === 0) {
+    throw new Error('No available models found');
   }
 
-  const options = { appId: uuid, network: 'fast' };
-  const client = await SogniClient.createInstance(options);
-  await client.account.login(username, password);
-  console.log(chalk.green(`(Акк #${accountIndex}) ✅ Авторизация успешна! (итерация ${iteration})`));
-
-  await client.projects.waitForModels();
-  const mostPopularModel = client.projects.availableModels.reduce((a, b) =>
+  // Выбираем модель с наибольшим workerCount
+  const mostPopularModel = availableModels.reduce((a, b) =>
     a.workerCount > b.workerCount ? a : b
   );
 
+  // Формируем случайный prompt
   const randomPrompt = getRandomPrompt();
   const randomStyle = getRandomElement(styles);
-  console.log(chalk.blue(`(Акк #${accountIndex}) 🚀 Генерация №${iteration}: "${randomPrompt}" (стиль: "${randomStyle}")`));
 
+  console.log(chalk.blue(
+    `(Акк #${accountIndex}) 🚀 Генерация №${iteration}: "${randomPrompt}" (стиль: "${randomStyle}")`
+  ));
+
+  // Создаём проект генерации
   const project = await client.projects.create({
     modelId: mostPopularModel.id,
     disableNSFWFilter: true,
@@ -106,62 +118,115 @@ async function generateOnce(username, password, uuid, accountIndex, iteration, p
     numberOfImages: 1,
   });
 
+  // Логируем прогресс
   project.on('progress', (progress) => {
     console.log(chalk.yellow(`(Акк #${accountIndex}) 📊 Прогресс №${iteration}: ${progress}`));
   });
 
+  // Ожидаем завершения
   const imageUrls = await project.waitForCompletion();
-  console.log(chalk.green(`(Акк #${accountIndex}) ✅ Изображение №${iteration} готово! URL: ${JSON.stringify(imageUrls)}`));
-
-  // Удаляем/комментируем метод, которого нет в библиотеке
-  // client.disconnect();
-
-  // Сбрасываем прокси
-  if (proxyUrl) {
-    delete process.env.HTTP_PROXY;
-    delete process.env.HTTPS_PROXY;
-  }
+  console.log(chalk.green(
+    `(Акк #${accountIndex}) ✅ Изображение №${iteration} готово! URL: ${JSON.stringify(imageUrls)}`
+  ));
 }
 
 /**
- * Бесконечный цикл генерации изображений для одного аккаунта.
+ * Цикл генерации для одного аккаунта:
+ * 1) Один раз создаём клиента SogniClient
+ * 2) Авторизуемся (login) один раз
+ * 3) В бесконечном цикле генерируем изображения, с retry при Timeout
  */
-async function generateLoopForAccount(username, password, uuid, accountIndex, proxyUrl = null) {
+async function generateLoopForAccount(username, password, uuid, accountIndex, proxyUrl) {
+  let client;
+  // Создаём клиента и авторизуемся один раз
+  try {
+    if (proxyUrl) {
+      process.env.HTTP_PROXY = proxyUrl;
+      process.env.HTTPS_PROXY = proxyUrl;
+      console.log(chalk.green(`(Акк #${accountIndex}) Используется прокси: ${proxyUrl}`));
+    }
+
+    const options = { appId: uuid, network: 'fast' };
+    client = await SogniClient.createInstance(options);
+
+    // Авторизация
+    await client.account.login(username, password);
+    console.log(chalk.green(`(Акк #${accountIndex}) ✅ Авторизация успешна (однократно)!`));
+
+    // Сбрасываем прокси, чтобы не влияло дальше
+    if (proxyUrl) {
+      delete process.env.HTTP_PROXY;
+      delete process.env.HTTPS_PROXY;
+    }
+
+  } catch (authError) {
+    console.error(chalk.red(`(Акк #${accountIndex}) ❌ Ошибка авторизации: ${authError.message}`));
+    return; // Прерываем, если не удалось авторизоваться
+  }
+
   let iteration = 1;
   while (true) {
-    try {
-      await generateOnce(username, password, uuid, accountIndex, iteration, proxyUrl);
-    } catch (error) {
-      console.error(chalk.red(`(Акк #${accountIndex}) ❌ Ошибка при генерации (итерация ${iteration}): ${error.message}`));
+    let success = false;
+    let attempts = 0;
+    const maxAttempts = 3;
+    while (!success && attempts < maxAttempts) {
+      try {
+        await generateOnceUsingClient(client, accountIndex, iteration);
+        success = true;
+      } catch (error) {
+        attempts++;
+        // Если ошибка - "Timeout waiting for models", делаем retry
+        if (error.message.includes('Timeout waiting for models')) {
+          console.error(chalk.red(
+            `(Акк #${accountIndex}) ❌ Попытка ${attempts} (итерация ${iteration}): Timeout. Повтор через 10 секунд...`
+          ));
+          await delay(10000);
+        } else {
+          console.error(chalk.red(
+            `(Акк #${accountIndex}) ❌ Ошибка при генерации (итерация ${iteration}): ${error.message}`
+          ));
+          break;
+        }
+      }
     }
-    const randomDelay = Math.floor(Math.random() * (60000 - 30000 + 1)) + 30000;
-    console.log(chalk.magenta(`(Акк #${accountIndex}) ⏳ Ожидание ${Math.round(randomDelay / 1000)} секунд перед следующей генерацией...`));
+    if (!success) {
+      console.error(chalk.red(
+        `(Акк #${accountIndex}) ❌ Превышено число попыток для итерации ${iteration}.`
+      ));
+    }
+
+    // Случайная задержка между 30 сек и 2 минут
+    const randomDelay = Math.floor(Math.random() * (120000 - 30000 + 1)) + 30000;
+    console.log(chalk.magenta(
+      `(Акк #${accountIndex}) ⏳ Ожидание ${Math.round(randomDelay / 1000)} секунд...`
+    ));
     await delay(randomDelay);
     iteration++;
   }
 }
 
 /**
- * Основная функция мультиаккаунтной генерации изображений.
- * Каждая строка data.txt: login|password|uuid
- * Если в proxy.txt есть строки, каждая соответствует аккаунту.
+ * Основная функция мультиаккаунтной генерации.
+ * data.txt: login|password|uuid
+ * proxy.txt: прокси по одной на строке (соответственно аккаунтам)
+ * Начальная задержка (0..15 сек) для каждого аккаунта, чтобы не стартовать всех сразу.
  */
 export async function generateImagesMulti() {
   console.log(chalk.cyan(`\n=== Мультиаккаунтный режим генерации изображений ===\n`));
 
-  // Читаем аккаунты из data.txt
-  const rawData = fs.readFileSync('data.txt', 'utf-8');
-  const accountLines = rawData.trim().split('\n');
-  if (!accountLines.length) {
+  let accountLines;
+  try {
+    const rawData = fs.readFileSync('data.txt', 'utf-8');
+    accountLines = rawData.trim().split('\n').filter(Boolean);
+  } catch (error) {
     console.log(chalk.red('Ошибка: файл data.txt пуст или не найден.'));
     return;
   }
 
-  // Читаем прокси (если есть)
   let proxies = [];
   try {
     const rawProxies = fs.readFileSync('proxy.txt', 'utf-8');
-    proxies = rawProxies.trim().split('\n').map(line => line.trim()).filter(line => line);
+    proxies = rawProxies.trim().split('\n').map(line => line.trim()).filter(Boolean);
     if (proxies.length) {
       console.log(chalk.green(`Найдено ${proxies.length} прокси.`));
     } else {
@@ -171,14 +236,22 @@ export async function generateImagesMulti() {
     console.log(chalk.yellow('Файл proxy.txt не найден, используется прямое соединение.'));
   }
 
-  const promises = accountLines.map((line, index) => {
+  const promises = accountLines.map(async (line, index) => {
     const [username, password, uuid] = line.trim().split('|');
     if (!username || !password || !uuid) {
-      console.log(chalk.red(`Строка #${index + 1} имеет неверный формат: ${line}`));
-      return Promise.resolve();
+      console.log(chalk.red(`Строка #${index + 1} неверный формат: ${line}`));
+      return;
     }
-    // Если для данного аккаунта есть прокси, используем его
-    const proxyUrl = proxies[index] ? proxies[index] : null;
+
+    const proxyUrl = proxies[index] || null;
+    // Случайная задержка 0..15 сек, чтобы не стартовать всех разом
+    const initialDelay = Math.floor(Math.random() * 15000);
+    console.log(chalk.magenta(
+      `(Акк #${index + 1}) Начальная задержка: ${(initialDelay / 1000).toFixed(2)} сек.`
+    ));
+    await delay(initialDelay);
+
+    // Запускаем бесконечную генерацию с одним клиентом (и одной авторизацией)
     return generateLoopForAccount(username, password, uuid, index + 1, proxyUrl);
   });
 
