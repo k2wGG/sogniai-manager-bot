@@ -1,0 +1,5 @@
+{
+  "minDelay": 30000,
+  "maxDelay": 150000,
+  "initialDelayMax": 50000
+}

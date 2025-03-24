@@ -4,6 +4,7 @@ import chalk from 'chalk';
 import { multiCheckAndClaim } from './dailyClaim.js';
 import { generateImagesMulti } from './imageGenerationMulti.js';
 import { addAccountData, addCustomPrompt, addTokens, addProxies } from './addData.js';
+import { updateDelayConfig } from './addConfig.js';
 
 function showBanner() {
   console.clear();
@@ -24,28 +25,29 @@ async function mainMenu() {
   showBanner();
   while (true) {
     const { choice } = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'choice',
-        message: 'Выберите действие:',
-        choices: [
-          { name: '1) Ежедневный клейм (Daily Claim)', value: 'claim' },
-          { name: '2) Генерация изображений (мультиаккаунт)', value: 'generate' },
-          { name: '3) Добавить данные (login|password|uuid)', value: 'addAccount' },
-          { name: '4) Добавить новые промты', value: 'addPrompt' },
-          { name: '5) Добавить токены (ежедневный клейм)', value: 'addTokens' },
-          { name: '6) Добавить прокси', value: 'addProxies' },
-          { name: '0) Выход', value: 'exit' }
-        ]
-      }
-    ]);
+	  {
+		type: 'rawlist',
+		name: 'choice',
+		message: 'Выберите действие:',
+		pageSize: 10, // здесь указываем нужное количество строк, например, 10
+		choices: [
+		  { name: 'Ежедневный клейм (Daily Claim)', value: 'claim' },
+		  { name: 'Генерация изображений (мультиаккаунт)', value: 'generate' },
+		  { name: 'Добавить данные (login|password|uuid)', value: 'addAccount' },
+		  { name: 'Добавить новые промты', value: 'addPrompt' },
+		  { name: 'Добавить токены (ежедневный клейм)', value: 'addTokens' },
+		  { name: 'Добавить прокси', value: 'addProxies' },
+		  { name: 'Обновить конфигурацию задержек', value: 'updateDelay' },
+		  { name: 'Выход', value: 'exit' }
+		]
+	  }
+	]);
+
 
     switch (choice) {
       case 'claim':
         console.log(chalk.green('Запуск режима ежедневного клейма...'));
-        // Если этот режим является бесконечным, меню не вернётся, поэтому можно сообщить пользователю
         multiCheckAndClaim();
-        // Если вы хотите одноразовую проверку, замените на соответствующую функцию
         break;
       case 'generate':
         console.log(chalk.green('Запуск мультиаккаунтной генерации изображений...'));
@@ -63,6 +65,9 @@ async function mainMenu() {
       case 'addProxies':
         await addProxies();
         break;
+      case 'updateDelay':
+        await updateDelayConfig();
+        break;
       case 'exit':
         console.log(chalk.green('Выход из программы.'));
         process.exit(0);
@@ -70,7 +75,6 @@ async function mainMenu() {
         console.log(chalk.red('Неверный пункт меню.'));
     }
 
-    // После выполнения выбранного действия ждем подтверждения, чтобы пользователь видел результат, и затем возвращаемся в меню
     await inquirer.prompt([
       { type: 'input', name: 'continue', message: 'Нажмите Enter для возврата в меню...' }
     ]);

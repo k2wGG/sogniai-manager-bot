@@ -4,8 +4,23 @@ import fs from 'fs';
 import chalk from 'chalk';
 
 /**
- * Списки для генерации случайных prompt'ов.
+ * Функция для чтения конфигурации задержек из файла src/config.json.
+ * Если файл не найден или возникла ошибка, возвращаются значения по умолчанию.
  */
+function getDelayConfig() {
+  try {
+    const data = fs.readFileSync('src/config.json', 'utf-8');
+    return JSON.parse(data);
+  } catch (error) {
+    return {
+      minDelay: 30000,        // 30 секунд
+      maxDelay: 120000,       // 2 минуты
+      initialDelayMax: 15000  // 15 секунд
+    };
+  }
+}
+
+// Списки для генерации prompt'ов
 const subjects = [
   'dragon', 'cyborg', 'pirate queen', 'ghostly samurai', 
   'dark angel', 'robot assassin', 'shaman warrior', 
@@ -41,16 +56,13 @@ const styles = [
   'watercolor painting', '3D render', 'vintage illustration', 'fantasy art'
 ];
 
-/**
- * Функция для выбора случайного элемента массива.
- */
+/** Выбор случайного элемента из массива */
 function getRandomElement(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-/**
- * Считываем кастомные промты (если есть) из prompts.txt и выбираем случайный.
- * С вероятностью 50% используем кастомный промт, иначе собираем случайный prompt из списков.
+/** Генерация случайного prompt.
+ * Если файл prompts.txt существует, с шансом 50% используется один из кастомных промтов.
  */
 function getRandomPrompt() {
   let customPrompts = [];
@@ -73,40 +85,30 @@ function getRandomPrompt() {
   }
 }
 
-/**
- * Функция задержки.
- */
+/** Функция задержки */
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
- * Генерация одного изображения, используя УЖЕ авторизованный клиент.
- * - Не создаём клиента заново
- * - Не делаем login() заново
+ * Генерация одного изображения, используя уже авторизованный client.
  */
 async function generateOnceUsingClient(client, accountIndex, iteration) {
-  // Ждём, пока библиотека соберёт список доступных моделей
   await client.projects.waitForModels();
   const availableModels = client.projects.availableModels;
   if (!availableModels || availableModels.length === 0) {
     throw new Error('No available models found');
   }
-
-  // Выбираем модель с наибольшим workerCount
   const mostPopularModel = availableModels.reduce((a, b) =>
     a.workerCount > b.workerCount ? a : b
   );
-
-  // Формируем случайный prompt
+  
   const randomPrompt = getRandomPrompt();
   const randomStyle = getRandomElement(styles);
-
   console.log(chalk.blue(
     `(Акк #${accountIndex}) 🚀 Генерация №${iteration}: "${randomPrompt}" (стиль: "${randomStyle}")`
   ));
-
-  // Создаём проект генерации
+  
   const project = await client.projects.create({
     modelId: mostPopularModel.id,
     disableNSFWFilter: true,
@@ -117,13 +119,11 @@ async function generateOnceUsingClient(client, accountIndex, iteration) {
     guidance: 7.5,
     numberOfImages: 1,
   });
-
-  // Логируем прогресс
+  
   project.on('progress', (progress) => {
     console.log(chalk.yellow(`(Акк #${accountIndex}) 📊 Прогресс №${iteration}: ${progress}`));
   });
-
-  // Ожидаем завершения
+  
   const imageUrls = await project.waitForCompletion();
   console.log(chalk.green(
     `(Акк #${accountIndex}) ✅ Изображение №${iteration} готово! URL: ${JSON.stringify(imageUrls)}`
@@ -131,39 +131,33 @@ async function generateOnceUsingClient(client, accountIndex, iteration) {
 }
 
 /**
- * Цикл генерации для одного аккаунта:
- * 1) Один раз создаём клиента SogniClient
- * 2) Авторизуемся (login) один раз
- * 3) В бесконечном цикле генерируем изображения, с retry при Timeout
+ * Бесконечный цикл генерации изображений для одного аккаунта.
+ * Клиент создаётся и авторизуется один раз, затем используется для всех итераций.
+ * Между итерациями задержка случайная от minDelay до maxDelay.
+ * При ошибке "Timeout waiting for models" выполняется до 3 повторных попыток с задержкой 10 секунд.
  */
-async function generateLoopForAccount(username, password, uuid, accountIndex, proxyUrl) {
+async function generateLoopForAccount(username, password, uuid, accountIndex, proxyUrl = null) {
+  const config = getDelayConfig();
   let client;
-  // Создаём клиента и авторизуемся один раз
   try {
     if (proxyUrl) {
       process.env.HTTP_PROXY = proxyUrl;
       process.env.HTTPS_PROXY = proxyUrl;
       console.log(chalk.green(`(Акк #${accountIndex}) Используется прокси: ${proxyUrl}`));
     }
-
     const options = { appId: uuid, network: 'fast' };
     client = await SogniClient.createInstance(options);
-
-    // Авторизация
     await client.account.login(username, password);
     console.log(chalk.green(`(Акк #${accountIndex}) ✅ Авторизация успешна (однократно)!`));
-
-    // Сбрасываем прокси, чтобы не влияло дальше
     if (proxyUrl) {
       delete process.env.HTTP_PROXY;
       delete process.env.HTTPS_PROXY;
     }
-
   } catch (authError) {
     console.error(chalk.red(`(Акк #${accountIndex}) ❌ Ошибка авторизации: ${authError.message}`));
-    return; // Прерываем, если не удалось авторизоваться
+    return;
   }
-
+  
   let iteration = 1;
   while (true) {
     let success = false;
@@ -175,10 +169,9 @@ async function generateLoopForAccount(username, password, uuid, accountIndex, pr
         success = true;
       } catch (error) {
         attempts++;
-        // Если ошибка - "Timeout waiting for models", делаем retry
         if (error.message.includes('Timeout waiting for models')) {
           console.error(chalk.red(
-            `(Акк #${accountIndex}) ❌ Попытка ${attempts} (итерация ${iteration}): Timeout. Повтор через 10 секунд...`
+            `(Акк #${accountIndex}) ❌ Попытка ${attempts} (итерация ${iteration}): Timeout waiting for models. Повтор через 10 секунд...`
           ));
           await delay(10000);
         } else {
@@ -190,30 +183,24 @@ async function generateLoopForAccount(username, password, uuid, accountIndex, pr
       }
     }
     if (!success) {
-      console.error(chalk.red(
-        `(Акк #${accountIndex}) ❌ Превышено число попыток для итерации ${iteration}.`
-      ));
+      console.error(chalk.red(`(Акк #${accountIndex}) ❌ Превышено число попыток для итерации ${iteration}.`));
     }
-
-    // Случайная задержка между 30 сек и 2 минут
-    const randomDelay = Math.floor(Math.random() * (120000 - 30000 + 1)) + 30000;
-    console.log(chalk.magenta(
-      `(Акк #${accountIndex}) ⏳ Ожидание ${Math.round(randomDelay / 1000)} секунд...`
-    ));
+    const randomDelay = Math.floor(Math.random() * (config.maxDelay - config.minDelay + 1)) + config.minDelay;
+    console.log(chalk.magenta(`(Акк #${accountIndex}) ⏳ Ожидание ${Math.round(randomDelay / 1000)} секунд перед следующей генерацией...`));
     await delay(randomDelay);
     iteration++;
   }
 }
 
 /**
- * Основная функция мультиаккаунтной генерации.
- * data.txt: login|password|uuid
- * proxy.txt: прокси по одной на строке (соответственно аккаунтам)
- * Начальная задержка (0..15 сек) для каждого аккаунта, чтобы не стартовать всех сразу.
+ * Основная функция мультиаккаунтной генерации изображений.
+ * Файл data.txt: каждая строка в формате login|password|uuid.
+ * Файл proxy.txt: прокси для аккаунтов (по одной строке).
+ * Для каждого аккаунта запускается генерация с начальной задержкой от 0 до initialDelayMax.
  */
 export async function generateImagesMulti() {
   console.log(chalk.cyan(`\n=== Мультиаккаунтный режим генерации изображений ===\n`));
-
+  
   let accountLines;
   try {
     const rawData = fs.readFileSync('data.txt', 'utf-8');
@@ -222,7 +209,7 @@ export async function generateImagesMulti() {
     console.log(chalk.red('Ошибка: файл data.txt пуст или не найден.'));
     return;
   }
-
+  
   let proxies = [];
   try {
     const rawProxies = fs.readFileSync('proxy.txt', 'utf-8');
@@ -235,25 +222,21 @@ export async function generateImagesMulti() {
   } catch (error) {
     console.log(chalk.yellow('Файл proxy.txt не найден, используется прямое соединение.'));
   }
-
+  
+  const config = getDelayConfig();
+  
   const promises = accountLines.map(async (line, index) => {
     const [username, password, uuid] = line.trim().split('|');
     if (!username || !password || !uuid) {
       console.log(chalk.red(`Строка #${index + 1} неверный формат: ${line}`));
       return;
     }
-
     const proxyUrl = proxies[index] || null;
-    // Случайная задержка 0..15 сек, чтобы не стартовать всех разом
-    const initialDelay = Math.floor(Math.random() * 15000);
-    console.log(chalk.magenta(
-      `(Акк #${index + 1}) Начальная задержка: ${(initialDelay / 1000).toFixed(2)} сек.`
-    ));
+    const initialDelay = Math.floor(Math.random() * config.initialDelayMax);
+    console.log(chalk.magenta(`(Акк #${index + 1}) Начальная задержка: ${(initialDelay / 1000).toFixed(2)} секунд.`));
     await delay(initialDelay);
-
-    // Запускаем бесконечную генерацию с одним клиентом (и одной авторизацией)
     return generateLoopForAccount(username, password, uuid, index + 1, proxyUrl);
   });
-
+  
   await Promise.all(promises);
 }
